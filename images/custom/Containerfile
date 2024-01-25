@@ -12,9 +12,11 @@ ENV PATH ${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/:${PATH}
 RUN useradd -ms /bin/bash frappe \
     && apt-get update \
     && apt-get install --no-install-recommends -y \
+    media-types \
     curl \
     git \
     vim \
+    ffmpeg \
     nginx \
     gettext-base \
     # weasyprint dependencies
