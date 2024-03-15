@@ -41,7 +41,7 @@ chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
 
 ### Prepare
 
-Clone `frappe_docker` repo for the needed YAMLs and change the current working director of you shell to the cloned repo.
+Clone `frappe_docker` repo for the needed YAMLs and change the current working directory of your shell to the cloned repo.
 
 ```shell
 git clone https://github.com/frappe/frappe_docker
@@ -82,6 +82,8 @@ EMAIL=admin@example.com
 HASHED_PASSWORD=$apr1$K.4gp7RT$tj9R2jHh0D4Gb5o5fIAzm/
 ```
 
+If Container does not deploy put the HASHED_PASSWORD in ''.
+
 Deploy the traefik container with letsencrypt SSL
 
 ```shell
@@ -91,7 +93,7 @@ docker compose --project-name traefik \
   -f overrides/compose.traefik-ssl.yaml up -d
 ```
 
-This will make the traefik dashboard available on `traefik.example.com` and all certificates will reside in `/data/traefik/certificates` on host filesystem.
+This will make the traefik dashboard available on `traefik.example.com` and all certificates will reside in the Docker volume `cert-data`.
 
 For LAN setup deploy the traefik container without overriding `overrides/compose.traefik-ssl.yaml`.
 
@@ -175,7 +177,7 @@ Create sites `one.example.com` and `two.example.com`:
 ```shell
 # one.example.com
 docker compose --project-name erpnext-one exec backend \
-  bench new-site one.example.com --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit
+  bench new-site --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit one.example.com
 ```
 
 You can stop here and have a single bench single site setup complete. Continue to add one more site to the current bench.
@@ -183,7 +185,7 @@ You can stop here and have a single bench single site setup complete. Continue t
 ```shell
 # two.example.com
 docker compose --project-name erpnext-one exec backend \
-  bench new-site two.example.com --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit
+  bench new-site --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit two.example.com
 ```
 
 #### Create second bench
@@ -234,10 +236,10 @@ Create sites `three.example.com` and `four.example.com`:
 ```shell
 # three.example.com
 docker compose --project-name erpnext-two exec backend \
-  bench new-site three.example.com --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit
+  bench new-site --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit three.example.com
 # four.example.com
 docker compose --project-name erpnext-two exec backend \
-  bench new-site four.example.com --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit
+  bench new-site --no-mariadb-socket --mariadb-root-password changeit --install-app erpnext --admin-password changeit four.example.com
 ```
 
 #### Create custom domain to existing site

@@ -6,10 +6,10 @@ variable "REGISTRY_USER" {
 }
 
 variable PYTHON_VERSION {
-    default = "3.11.4"
+    default = "3.11.6"
 }
 variable NODE_VERSION {
-    default = "18.16.1"
+    default = "18.18.2"
 }
 
 variable "FRAPPE_VERSION" {
@@ -32,6 +32,10 @@ variable "BENCH_REPO" {
     default = "https://github.com/frappe/bench"
 }
 
+variable "LATEST_BENCH_RELEASE" {
+    default = "latest"
+}
+
 # Bench image
 
 target "bench" {
@@ -40,7 +44,10 @@ target "bench" {
     }
     context = "images/bench"
     target = "bench"
-    tags = ["frappe/bench:latest"]
+    tags = [
+        "frappe/bench:${LATEST_BENCH_RELEASE}",
+        "frappe/bench:latest",
+    ]
 }
 
 target "bench-test" {
