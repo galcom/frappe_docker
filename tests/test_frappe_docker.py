@@ -10,7 +10,6 @@ from tests.utils import Compose, check_url_content
 BACKEND_SERVICES = (
     "backend",
     "queue-short",
-    "queue-default",
     "queue-long",
     "scheduler",
 )
@@ -39,7 +38,7 @@ def assets_cb(text: str):
 
 
 @pytest.mark.parametrize(
-    ("url", "callback"), (("/", index_cb), ("/api/method/version", api_cb))
+    ("url", "callback"), (("/", index_cb), ("/api/method/ping", api_cb))
 )
 def test_endpoints(url: str, callback: Any, frappe_site: str):
     check_url_content(
@@ -127,7 +126,7 @@ class TestErpnext:
         ("url", "callback"),
         (
             (
-                "/api/method/erpnext.templates.pages.product_search.get_product_list",
+                "/api/method/erpnext.templates.pages.search_help.get_help_results_sections?text=help",
                 api_cb,
             ),
             ("/assets/erpnext/js/setup_wizard.js", assets_cb),
