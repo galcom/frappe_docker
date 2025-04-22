@@ -15,7 +15,7 @@ version: "3"
 
 services:
   backend:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
     deploy:
       restart_policy:
@@ -25,7 +25,7 @@ services:
       - logs:/home/frappe/frappe-bench/logs
 
   configurator:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
     deploy:
       restart_policy:
@@ -33,6 +33,7 @@ services:
     entrypoint:
       - bash
       - -c
+    # add redis_socketio for backward compatibility
     command:
       - >
         ls -1 apps > sites/apps.txt;
@@ -40,6 +41,7 @@ services:
         bench set-config -gp db_port $$DB_PORT;
         bench set-config -g redis_cache "redis://$$REDIS_CACHE";
         bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
         bench set-config -gp socketio_port $$SOCKETIO_PORT;
     environment:
       DB_HOST: db
@@ -52,7 +54,7 @@ services:
       - logs:/home/frappe/frappe-bench/logs
 
   create-site:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
     deploy:
       restart_policy:
@@ -81,7 +83,7 @@ services:
           fi
         done;
         echo "sites/common_site_config.json found";
-        bench new-site --no-mariadb-socket --admin-password=admin --db-root-password=admin --install-app erpnext --set-default frontend;
+        bench new-site --mariadb-user-host-login-scope=% --admin-password=admin --db-root-password=admin --install-app erpnext --set-default frontend;
 
   db:
     image: mariadb:10.6
@@ -89,7 +91,7 @@ services:
     healthcheck:
       test: mysqladmin ping -h localhost --password=admin
       interval: 1s
-      retries: 15
+      retries: 20
     deploy:
       restart_policy:
         condition: on-failure
@@ -104,8 +106,10 @@ services:
       - db-data:/var/lib/mysql
 
   frontend:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
+    depends_on:
+      - websocket
     deploy:
       restart_policy:
         condition: on-failure
@@ -127,7 +131,7 @@ services:
       - "8080:8080"
 
   queue-long:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
     deploy:
       restart_policy:
@@ -136,13 +140,13 @@ services:
       - bench
       - worker
       - --queue
-      - long
+      - long,default,short
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
 
   queue-short:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
     deploy:
       restart_policy:
@@ -151,7 +155,7 @@ services:
       - bench
       - worker
       - --queue
-      - short
+      - short,default
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -171,11 +175,9 @@ services:
     deploy:
       restart_policy:
         condition: on-failure
-    volumes:
-      - redis-cache-data:/data
 
   scheduler:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
     deploy:
       restart_policy:
@@ -188,7 +190,7 @@ services:
       - logs:/home/frappe/frappe-bench/logs
 
   websocket:
-    image: frappe/erpnext:v14
+    image: frappe/erpnext:v15
     platform: linux/amd64
     deploy:
       restart_policy:
@@ -203,7 +205,6 @@ services:
 volumes:
   db-data:
   redis-queue-data:
-  redis-cache-data:
   sites:
   logs:
 ```
