@@ -9,14 +9,13 @@ services:
 
   redis-cache:
     image: redis:6.2-alpine
-    volumes:
-      - redis-cache-data:/data
+    restart: unless-stopped
 
   redis-queue:
     image: redis:6.2-alpine
+    restart: unless-stopped
     volumes:
       - redis-queue-data:/data
 
 volumes:
-  redis-cache-data:
   redis-queue-data:
