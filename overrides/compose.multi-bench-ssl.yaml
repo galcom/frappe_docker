@@ -1,6 +1,15 @@
 services:
   frontend:
     labels:
+
+      - traefik.http.middlewares.aliases-mw.headers.customrequestheaders.Host=store.galcom.org
+      - traefik.http.routers.aliases.middlewares=aliases-mw
+      - traefik.http.routers.aliases.rule=Host(${ALIASES?ALIASES not set})
+      - traefik.http.routers.aliases.entrypoints=https
+      - traefik.http.routers.aliases.tls.certresolver=le
+      - traefik.http.routers.aliases.tls=true
+      - traefik.http.routers.aliases.service=${ROUTER}
+
       # ${ROUTER}-http to use the middleware to redirect to https
       - traefik.http.routers.${ROUTER}-http.middlewares=https-redirect
       # ${ROUTER}-https the actual router using HTTPS
