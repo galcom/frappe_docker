@@ -3,7 +3,6 @@ x-customizable-image: &customizable_image
   # See https://github.com/frappe/frappe_docker/blob/main/docs/custom-apps.md
   # about using custom images.
   #image: frappe/erpnext:${ERPNEXT_VERSION:?No ERPNext version set}
-  #image: galcom-erp:1.0.0 
   image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-$ERPNEXT_VERSION}
   pull_policy: ${PULL_POLICY:-always}
   restart: ${RESTART_POLICY:-unless-stopped}
