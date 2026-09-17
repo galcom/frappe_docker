@@ -7,6 +7,7 @@
 #   ./re-deploy.sh --migrate         run `bench migrate` after the stack comes up
 #   ./re-deploy.sh --backup          run `bench backup` before migrating (recommended)
 #   ./re-deploy.sh --dry-run         render and report only; the running stack is untouched
+#   ./re-deploy.sh --project NAME    act on another environment (default: staging)
 #
 # Rolling back after a --migrate is NOT safe by itself: once the schema has changed, an
 # older image may not run against it. Use --backup and be prepared to restore.
@@ -21,11 +22,36 @@ set -uo pipefail
 # symlink pointing at this script still resolves to the right place.
 cd "$(dirname "$(readlink -f "$0")")/../.."
 
-PROJECT=staging
-SITE=staging.galcom.local
-IMAGE=galcom-erp
+# Which environment. Override with --project NAME or PROJECT=name in the environment.
+# Everything else is derived from it, so the same script serves staging and production.
+PROJECT="${PROJECT:-staging}"
+for i in $(seq 1 $#); do
+  [ "${!i}" = "--project" ] || continue
+  j=$((i+1)); PROJECT="${!j:-$PROJECT}"
+done
+
 ENV_FILE=config/$PROJECT.env
 OUT=config/$PROJECT.yaml
+[ -f "$ENV_FILE" ] || { echo "error: $ENV_FILE not found (wrong --project?)" >&2; exit 1; }
+
+# Read (never source) the env file: it contains backticks that a shell would execute.
+envget() { sed -n "s/^$1=//p" "$ENV_FILE" | head -1; }
+
+IMAGE=$(envget CUSTOM_IMAGE); IMAGE="${IMAGE:-galcom-erp}"
+
+# SITE= wins if present; otherwise take the host out of SITES_RULE=Host(`site`)
+SITE=$(envget SITE)
+[ -n "$SITE" ] || SITE=$(sed -n 's/^SITES_RULE=.*Host(`\([^`]*\)`).*/\1/p' "$ENV_FILE" | head -1)
+[ -n "$SITE" ] || { echo "error: cannot determine the site name; add SITE=<site> to $ENV_FILE" >&2; exit 1; }
+
+# Compose file list, overridable per environment with COMPOSE_FILES= in the env file.
+FILES=$(envget COMPOSE_FILES)
+FILES="${FILES:-frappe_docker/compose.yaml frappe_docker/overrides/compose.redis.yaml frappe_docker/overrides/compose.multi-bench.yaml config/local_overrides.yaml}"
+COMPOSE_ARGS=()
+for f in $FILES; do
+  [ -f "$f" ] || { echo "error: compose file not found: $f" >&2; exit 1; }
+  COMPOSE_ARGS+=(-f "$f")
+done
 
 DRY=0; TAG=""; MIGRATE=0; BACKUP=0
 while [ $# -gt 0 ]; do
@@ -37,6 +63,7 @@ while [ $# -gt 0 ]; do
       tail -10 config/deploy-history.log 2>/dev/null | sed 's/^/  /' || true
       [ -s config/deploy-history.log ] || echo "  (none recorded yet)"
       exit 0 ;;
+    --project) shift ;;   # consumed in the pre-scan above
     --dry-run) DRY=1 ;;
     --migrate) MIGRATE=1 ;;
     --backup)  BACKUP=1 ;;
@@ -59,12 +86,7 @@ fi
 RUNNING=$(docker inspect ${PROJECT}-backend-1 --format '{{.Config.Image}}' 2>/dev/null || echo none)
 
 render() {
-  docker compose --project-name $PROJECT --env-file $ENV_FILE \
-    -f frappe_docker/compose.yaml \
-    -f frappe_docker/overrides/compose.redis.yaml \
-    -f frappe_docker/overrides/compose.multi-bench.yaml \
-    -f config/local_overrides.yaml \
-    config
+  docker compose --project-name $PROJECT --env-file $ENV_FILE "${COMPOSE_ARGS[@]}" config
 }
 
 if [ "$DRY" = 1 ]; then
@@ -108,8 +130,8 @@ dc_exec backend bench --site $SITE clear-cache \
 dc_exec redis-cache redis-cli FLUSHALL \
   || echo "warning: redis FLUSHALL failed"
 
-printf '%s  deployed=%s  previous=%s  migrate=%s  backup=%s\n' \
-  "$(date -u +%FT%TZ)" "$TARGET" "$RUNNING" "$MIGRATE" "$BACKUP" >> config/deploy-history.log
+printf '%s  project=%s  deployed=%s  previous=%s  migrate=%s  backup=%s\n' \
+  "$(date -u +%FT%TZ)" "$PROJECT" "$TARGET" "$RUNNING" "$MIGRATE" "$BACKUP" >> config/deploy-history.log
 echo
 echo "deployed $TARGET"
 echo "roll back with:  ./re-deploy.sh ${RUNNING##*:}"

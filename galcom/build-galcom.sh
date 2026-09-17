@@ -9,6 +9,8 @@
 #   ./build-galcom.sh --full           --no-cache: rebuild every layer (rarely needed)
 #   ./build-galcom.sh --dry-run        print the docker build command and stop
 #   ./build-galcom.sh --list           show images available to deploy or roll back to
+#   ./build-galcom.sh --project NAME   which environment the prune guard checks
+#                                      and which config/<NAME>.env names the image
 #   ./build-galcom.sh --prune N        keep the newest N versions, delete older ones and
 #                                      exit. The currently deployed tag is always kept.
 #                                      Combine with --dry-run to preview.
@@ -28,9 +30,20 @@ set -euo pipefail
 # symlink pointing at this script still resolves to the right place.
 cd "$(dirname "$(readlink -f "$0")")/../.."
 
-IMAGE=galcom-erp
+# Which environment the prune guard consults, and where the image name comes from.
+# Override with --project NAME or PROJECT=name. The build itself is environment-agnostic.
+PROJECT="${PROJECT:-staging}"
+for i in $(seq 1 $#); do
+  [ "${!i}" = "--project" ] || continue
+  j=$((i+1)); PROJECT="${!j:-$PROJECT}"
+done
+
 CONTEXT=frappe_docker
 CONTAINERFILE=images/custom/Containerfile
+ENV_FILE=config/$PROJECT.env
+
+IMAGE=$(sed -n 's/^CUSTOM_IMAGE=//p' "$ENV_FILE" 2>/dev/null | head -1)
+IMAGE="${IMAGE:-galcom-erp}"
 
 MODE=apps
 TAG=""
@@ -41,6 +54,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --reuse-apps) MODE=reuse-apps ;;
     --full)       MODE=full ;;
+    --project)    shift ;;   # consumed in the pre-scan above
     --dry-run)    DRY=1 ;;
     --prune)      PRUNE="${2:-}"; shift ;;
     --list)       docker image ls "$IMAGE" --format '  {{.Tag}}  {{.ID}}  {{.CreatedSince}}  {{.Size}}' | sort -r; exit 0 ;;
@@ -61,12 +75,12 @@ if [ -n "$PRUNE" ]; then
   # 1.0.0 or latest are never touched.
   mapfile -t VERSIONS < <(docker image ls "$IMAGE" --format '{{.Tag}}' \
                             | grep -E '^[0-9]{8}-[0-9]{4}$' | sort -r)
-  DEPLOYED=$(docker inspect staging-backend-1 --format '{{.Config.Image}}' 2>/dev/null \
+  DEPLOYED=$(docker inspect "${PROJECT}-backend-1" --format '{{.Config.Image}}' 2>/dev/null \
                | cut -d: -f2- || true)
 
   echo "versioned tags : ${#VERSIONS[@]}"
   echo "keeping newest : $PRUNE"
-  [ -n "$DEPLOYED" ] && echo "deployed now   : $DEPLOYED (always kept)"
+  [ -n "$DEPLOYED" ] && echo "deployed now   : $DEPLOYED (${PROJECT}-backend-1, always kept)"
 
   if [ "${#VERSIONS[@]}" -le "$PRUNE" ]; then
     echo "nothing to remove"

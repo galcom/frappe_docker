@@ -2,10 +2,6 @@ ARG PYTHON_VERSION=3.14.2
 ARG DEBIAN_BASE=bookworm
 FROM python:${PYTHON_VERSION}-slim-${DEBIAN_BASE} AS base
 
-COPY resources/core/nginx/nginx-template.conf /templates/nginx/frappe.conf.template
-COPY resources/core/nginx/nginx-entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
-COPY resources/core/nginx/dfp/ /templates/nginx/dfp/
-COPY resources/core/nginx/security_headers.conf /etc/nginx/snippets/security_headers.conf
 
 ARG WKHTMLTOPDF_VERSION=0.12.6.1-3
 ARG WKHTMLTOPDF_DISTRO=bookworm
@@ -86,9 +82,7 @@ RUN useradd -ms /bin/bash frappe \
     && chown -R frappe:frappe /etc/nginx/snippets \
     && chown -R frappe:frappe /var/log/nginx \
     && chown -R frappe:frappe /var/lib/nginx \
-    && chown -R frappe:frappe /run/nginx.pid \
-    && chmod 755 /usr/local/bin/nginx-entrypoint.sh \
-    && chmod 644 /templates/nginx/frappe.conf.template
+    && chown -R frappe:frappe /run/nginx.pid
 
 
 FROM base AS builder
@@ -172,6 +166,17 @@ RUN chmod 755 /usr/local/bin/entrypoint.sh
 
 COPY resources/core/start.sh /usr/local/bin/start.sh
 RUN chmod 755 /usr/local/bin/start.sh
+
+# nginx config is needed only at runtime, never by the builder stage. Copying it here --
+# after the expensive apt/node layers and after the app bench is copied in -- means
+# editing a template, the entrypoint or a dfp fragment rebuilds only these last few
+# small layers instead of invalidating the whole image.
+COPY resources/core/nginx/nginx-template.conf /templates/nginx/frappe.conf.template
+COPY resources/core/nginx/nginx-entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
+COPY resources/core/nginx/dfp/ /templates/nginx/dfp/
+COPY resources/core/nginx/security_headers.conf /etc/nginx/snippets/security_headers.conf
+RUN chmod 755 /usr/local/bin/nginx-entrypoint.sh \
+    && chmod 644 /templates/nginx/frappe.conf.template
 
 USER frappe
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
