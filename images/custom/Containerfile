@@ -4,6 +4,7 @@ FROM python:${PYTHON_VERSION}-slim-${DEBIAN_BASE} AS base
 
 COPY resources/core/nginx/nginx-template.conf /templates/nginx/frappe.conf.template
 COPY resources/core/nginx/nginx-entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
+COPY resources/core/nginx/dfp/ /templates/nginx/dfp/
 COPY resources/core/nginx/security_headers.conf /etc/nginx/snippets/security_headers.conf
 
 ARG WKHTMLTOPDF_VERSION=0.12.6.1-3
@@ -79,6 +80,8 @@ RUN useradd -ms /bin/bash frappe \
     && ln -sf /dev/stdout /var/log/nginx/access.log && ln -sf /dev/stderr /var/log/nginx/error.log \
     && touch /run/nginx.pid \
     && chown -R frappe:frappe /etc/nginx/conf.d \
+    && mkdir -p /etc/nginx/dfp \
+    && chown -R frappe:frappe /etc/nginx/dfp \
     && chown -R frappe:frappe /etc/nginx/nginx.conf \
     && chown -R frappe:frappe /etc/nginx/snippets \
     && chown -R frappe:frappe /var/log/nginx \
