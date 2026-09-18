@@ -15,8 +15,9 @@
 #                                      project is running, else config/last-built-tag)
 #   ./build-galcom.sh --dry-run        print the docker build command and stop
 #   ./build-galcom.sh --list           show images available to deploy or roll back to
-#   ./build-galcom.sh --project NAME   which environment the prune guard checks
-#                                      and which config/<NAME>.env names the image
+#   --project NAME  REQUIRED, no default. Selects config/<NAME>.env, which names the
+#                   image, and the <NAME>-backend-1 container the prune guard protects.
+#                   May also be given as PROJECT=<NAME> in the environment.
 #   ./build-galcom.sh --prune N        keep the newest N versions, delete older ones and
 #                                      exit. The currently deployed tag is always kept.
 #                                      Combine with --dry-run to preview.
@@ -38,15 +39,36 @@ cd "$(dirname "$(readlink -f "$0")")/../.."
 
 # Which environment the prune guard consults, and where the image name comes from.
 # Override with --project NAME or PROJECT=name. The build itself is environment-agnostic.
-PROJECT="${PROJECT:-staging}"
+# Print the comment header as help.
+usage() { awk 'NR==1{next} /^#/{print; next} {exit}' "$0"; }
+environments() { ls config/*.env 2>/dev/null | sed 's|config/||; s|\.env$||' | tr '\n' ' '; }
+
+# --help works without a project; everything else needs one.
+case " $* " in *" --help "*|*" -h "*) usage; exit 0 ;; esac
+
+# No default on purpose: building or pruning against the wrong environment is not
+# something to do by accident. --project, or PROJECT= in the environment.
+PROJECT="${PROJECT:-}"
 for i in $(seq 1 $#); do
   [ "${!i}" = "--project" ] || continue
-  j=$((i+1)); PROJECT="${!j:-$PROJECT}"
+  j=$((i+1)); PROJECT="${!j:-}"
 done
+
+if [ -z "$PROJECT" ]; then
+  usage
+  echo "error: --project is required (no default). Available: $(environments)" >&2
+  exit 1
+fi
 
 CONTEXT=frappe_docker
 CONTAINERFILE=images/custom/Containerfile
 ENV_FILE=config/$PROJECT.env
+
+if [ ! -f "$ENV_FILE" ]; then
+  usage
+  echo "error: no such environment '$PROJECT' ($ENV_FILE not found). Available: $(environments)" >&2
+  exit 1
+fi
 
 IMAGE=$(sed -n 's/^CUSTOM_IMAGE=//p' "$ENV_FILE" 2>/dev/null | head -1)
 IMAGE="${IMAGE:-galcom-erp}"
@@ -68,7 +90,7 @@ while [ $# -gt 0 ]; do
     --app)        APP="${2:-}"; shift ;;
     --from)       FROM_TAG="${2:-}"; shift ;;
     --list)       docker image ls "$IMAGE" --format '  {{.Tag}}  {{.ID}}  {{.CreatedSince}}  {{.Size}}' | sort -r; exit 0 ;;
-    -h|--help)    sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help)    usage; exit 0 ;;
     -*)           echo "unknown option: $1" >&2; exit 1 ;;
     *)            TAG="$1" ;;
   esac
