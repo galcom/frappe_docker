@@ -1,5 +1,6 @@
 # Environment Variables
 .env
+apps.json
 
 # mounted volume
 sites
