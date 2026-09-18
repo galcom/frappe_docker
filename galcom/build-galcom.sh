@@ -7,6 +7,12 @@
 #   ./build-galcom.sh --reuse-apps     also reuse the cached app layer. Only correct when
 #                                      neither apps.json nor any pinned app branch moved
 #   ./build-galcom.sh --full           --no-cache: rebuild every layer (rarely needed)
+#   ./build-galcom.sh --app galcom     FAST PATH: refresh one app on top of an existing
+#                                      image instead of rebuilding from scratch. Re-clones
+#                                      just that app and rebuilds only its assets.
+#   ./build-galcom.sh --app galcom --from 20260917-2052
+#                                      base it on a specific image (default: the tag this
+#                                      project is running, else config/last-built-tag)
 #   ./build-galcom.sh --dry-run        print the docker build command and stop
 #   ./build-galcom.sh --list           show images available to deploy or roll back to
 #   ./build-galcom.sh --project NAME   which environment the prune guard checks
@@ -49,6 +55,8 @@ MODE=apps
 TAG=""
 DRY=0
 PRUNE=""
+APP=""
+FROM_TAG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -57,6 +65,8 @@ while [ $# -gt 0 ]; do
     --project)    shift ;;   # consumed in the pre-scan above
     --dry-run)    DRY=1 ;;
     --prune)      PRUNE="${2:-}"; shift ;;
+    --app)        APP="${2:-}"; shift ;;
+    --from)       FROM_TAG="${2:-}"; shift ;;
     --list)       docker image ls "$IMAGE" --format '  {{.Tag}}  {{.ID}}  {{.CreatedSince}}  {{.Size}}' | sort -r; exit 0 ;;
     -h|--help)    sed -n '2,22p' "$0"; exit 0 ;;
     -*)           echo "unknown option: $1" >&2; exit 1 ;;
@@ -108,6 +118,60 @@ if docker image inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
   echo "error: $IMAGE:$TAG already exists. Tags are kept so you can roll back to them." >&2
   echo "       Choose another tag, or 'docker rmi $IMAGE:$TAG' if it is genuinely junk." >&2
   exit 1
+fi
+
+if [ -n "$APP" ]; then
+  # Base image: explicit --from, else what this project runs, else the last build.
+  if [ -z "$FROM_TAG" ]; then
+    FROM_TAG=$(docker inspect "${PROJECT}-backend-1" --format '{{.Config.Image}}' 2>/dev/null | cut -d: -f2- || true)
+    [ -n "$FROM_TAG" ] || FROM_TAG=$(cat config/last-built-tag 2>/dev/null || true)
+  fi
+  [ -n "$FROM_TAG" ] || { echo "error: no base image; pass --from <tag>" >&2; exit 1; }
+  docker image inspect "$IMAGE:$FROM_TAG" >/dev/null 2>&1 \
+    || { echo "error: base image $IMAGE:$FROM_TAG not found" >&2; exit 1; }
+
+  # Pull this app's repo URL and branch out of apps.json. The URL carries a credential,
+  # so it goes to the build as a secret file, never as a build arg or on a command line.
+  APP_BRANCH=$(python3 - "$APP" <<'PYEOF'
+import json, sys
+app = sys.argv[1]
+for a in json.load(open("frappe_docker/apps.json")):
+    if a["url"].rstrip("/").rsplit("/", 1)[-1].replace(".git", "").lower() == app.lower():
+        print(a.get("branch", "")); break
+PYEOF
+)
+  [ -n "$APP_BRANCH" ] || { echo "error: app '$APP' not found in frappe_docker/apps.json" >&2; exit 1; }
+
+  SECRET=$(mktemp); chmod 600 "$SECRET"; trap 'rm -f "$SECRET"' EXIT
+  python3 - "$APP" > "$SECRET" <<'PYEOF'
+import json, sys
+app = sys.argv[1]
+for a in json.load(open("frappe_docker/apps.json")):
+    if a["url"].rstrip("/").rsplit("/", 1)[-1].replace(".git", "").lower() == app.lower():
+        sys.stdout.write(a["url"]); break
+PYEOF
+
+  echo "image  : $IMAGE:$TAG"
+  echo "mode   : app-update ($APP @ $APP_BRANCH)"
+  echo "base   : $IMAGE:$FROM_TAG"
+  echo "cmd    : (cd $CONTEXT && docker build --build-arg BASE_IMAGE=$IMAGE:$FROM_TAG --build-arg APP=$APP --build-arg APP_BRANCH=$APP_BRANCH --secret id=app_repo,src=<url> --tag $IMAGE:$TAG --file images/custom/Containerfile.app .)"
+  [ "$DRY" = 1 ] && exit 0
+
+  cd "$CONTEXT"
+  time docker build \
+    --build-arg "BASE_IMAGE=$IMAGE:$FROM_TAG" \
+    --build-arg "APP=$APP" \
+    --build-arg "APP_BRANCH=$APP_BRANCH" \
+    --build-arg "CACHE_BUST=$(date -u +%Y%m%dT%H%M%S)" \
+    --secret "id=app_repo,src=$SECRET" \
+    --tag "$IMAGE:$TAG" \
+    --file images/custom/Containerfile.app .
+  cd ..
+  echo "$TAG" > config/last-built-tag
+  echo
+  echo "built $IMAGE:$TAG  ($APP refreshed on $IMAGE:$FROM_TAG)"
+  echo "deploy with:  ./re-deploy.sh $TAG"
+  exit 0
 fi
 
 BUILD_ARGS=()
