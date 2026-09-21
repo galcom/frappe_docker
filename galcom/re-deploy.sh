@@ -41,13 +41,22 @@ for i in $(seq 1 $#); do
 done
 
 ENV_FILE=config/$PROJECT.env
-OUT=config/$PROJECT.yaml
 [ -f "$ENV_FILE" ] || { echo "error: $ENV_FILE not found (wrong --project?)" >&2; exit 1; }
 
 # Read (never source) the env file: it contains backticks that a shell would execute.
 envget() { sed -n "s/^$1=//p" "$ENV_FILE" | head -1; }
 
 IMAGE=$(envget CUSTOM_IMAGE); IMAGE="${IMAGE:-galcom-erp}"
+
+# The compose project name is not always the env-file name: this host keeps production
+# settings in production.env but runs the stack as project "erpnext-prod". Deploying under
+# the wrong name silently builds a SECOND, empty stack instead of updating the real one,
+# so take it from COMPOSE_PROJECT_NAME when the env file sets it.
+STACK=$(envget COMPOSE_PROJECT_NAME); STACK="${STACK:-$PROJECT}"
+OUT=config/$STACK.yaml
+if ! docker ps -a --format '{{.Label "com.docker.compose.project"}}' | grep -qx "$STACK"; then
+  echo "note: no existing containers for compose project '$STACK' -- this will create a new stack" >&2
+fi
 
 # SITE= wins if present; otherwise take the host out of SITES_RULE=Host(`site`)
 SITE=$(envget SITE)
@@ -94,15 +103,27 @@ if [ -n "$TAG" ]; then
   export CUSTOM_TAG="$TAG"        # shell env wins over the --env-file value
 fi
 
-RUNNING=$(docker inspect ${PROJECT}-backend-1 --format '{{.Config.Image}}' 2>/dev/null || echo none)
+RUNNING=$(docker inspect ${STACK}-backend-1 --format '{{.Config.Image}}' 2>/dev/null || echo none)
+
+want_tag() { echo "${CUSTOM_TAG:-$(envget CUSTOM_TAG)}"; }
+mixed_images() {  # $1 = rendered compose file
+  awk -v img="$IMAGE" -v want="$IMAGE:$(want_tag)" '
+    /^  [a-zA-Z0-9_-]+:$/ { svc=$1 }
+    $1=="image:" && $2 ~ "^" img ":" && $2 != want { print "    " svc " -> " $2 }' "$1" | sort -u
+}
 
 render() {
-  docker compose --project-name $PROJECT --env-file $ENV_FILE "${COMPOSE_ARGS[@]}" config
+  docker compose --project-name $STACK --env-file $ENV_FILE "${COMPOSE_ARGS[@]}" config
 }
 
 if [ "$DRY" = 1 ]; then
   echo "running now : $RUNNING"
-  echo "would deploy: $(render 2>/dev/null | grep -m1 'image:' | tr -d ' ' | cut -d: -f2-)"
+  TMP=$(mktemp); render > "$TMP" 2>/dev/null
+  echo "stack       : $STACK (compose project)"
+  echo "would deploy: $IMAGE:$(want_tag)"
+  M=$(mixed_images "$TMP")
+  [ -n "$M" ] && { echo "WARNING: these services are pinned to a different image:"; echo "$M"; }
+  rm -f "$TMP"
   [ "$BACKUP" = 1 ]  && echo "would backup: yes (bench --site $SITE backup)"
   [ "$MIGRATE" = 1 ] && echo "would migrate: yes (bench --site $SITE migrate)"
   exit 0
@@ -110,7 +131,7 @@ fi
 
 # Is gunicorn answering? Any HTTP status counts -- a 404 still means it is serving.
 backend_ready() {
-  docker compose -p $PROJECT -f "$OUT" exec -T backend python -c "
+  docker compose -p $STACK -f "$OUT" exec -T backend python -c "
 import urllib.request, urllib.error, sys
 try: urllib.request.urlopen('http://127.0.0.1:8000/api/method/ping', timeout=3)
 except urllib.error.HTTPError: pass
@@ -130,7 +151,22 @@ wait_backend() {
 
 [ -f "$OUT" ] && cp -p "$OUT" "$OUT.bak-$(date +%Y%m%d-%H%M%S)"
 render > "$OUT"
-TARGET=$(grep -m1 'image:' "$OUT" | tr -d ' ' | cut -d: -f2-)
+
+# What we intend to run, not whatever image line happens to come first in the file.
+WANT_TAG="${CUSTOM_TAG:-$(envget CUSTOM_TAG)}"
+TARGET="$IMAGE:$WANT_TAG"
+
+# A service pinned to a literal tag in an override file silently ignores CUSTOM_TAG, so
+# part of the stack keeps running the old build. That is almost never intended: name the
+# offenders and stop rather than deploying a mixed stack.
+MIXED=$(mixed_images "$OUT")
+if [ -n "$MIXED" ]; then
+  echo "error: these services are pinned to a different image than $TARGET:" >&2
+  echo "$MIXED" >&2
+  echo "  They carry a literal 'image:' in an override file (usually config/local_overrides.yaml)." >&2
+  echo "  Replace it with: image: \${CUSTOM_IMAGE:-frappe/erpnext}:\${CUSTOM_TAG:-\$ERPNEXT_VERSION}" >&2
+  exit 1
+fi
 echo "running now : $RUNNING"
 echo "deploying   : $TARGET   (whole stack down for ~1 minute)"
 
@@ -152,13 +188,18 @@ if [ "$FAST" = 1 ]; then
   fi
 
   echo "== backend (the only user-visible restart) =="
-  docker compose -p $PROJECT -f "$OUT" up -d --no-deps backend
+  docker compose -p $STACK -f "$OUT" up -d --no-deps backend
   wait_backend
 else
-  docker compose -p $PROJECT -f "$OUT" down
-  docker compose -p $PROJECT -f "$OUT" up -d
+  docker compose -p $STACK -f "$OUT" down
+  if ! docker compose -p $STACK -f "$OUT" up -d; then
+    echo "error: 'docker compose up' failed; the stack is NOT fully running." >&2
+    echo "       Check the message above (a port clash or a name collision with another" >&2
+    echo "       project on this host is the usual cause), then re-run." >&2
+    exit 1
+  fi
 fi
-dc_exec() { docker compose -p $PROJECT -f "$OUT" exec -T "$@"; }
+dc_exec() { docker compose -p $STACK -f "$OUT" exec -T "$@"; }
 
 if [ "$BACKUP" = 1 ]; then
   echo "== backup =="
@@ -180,10 +221,10 @@ fi
 
 if [ "$FAST" = 1 ]; then
   echo "== workers and scheduler (site stays up) =="
-  docker compose -p $PROJECT -f "$OUT" up -d --no-deps $WORKERS
+  docker compose -p $STACK -f "$OUT" up -d --no-deps $WORKERS
   if [ "$ASSETS_CHANGED" = 1 ]; then
     echo "== frontend (assets changed) =="
-    docker compose -p $PROJECT -f "$OUT" up -d --no-deps frontend
+    docker compose -p $STACK -f "$OUT" up -d --no-deps frontend
   fi
 fi
 
@@ -196,8 +237,24 @@ else
   echo "  skipped clear-cache and FLUSHALL (assets unchanged)"
 fi
 
+# A deploy that leaves the site unreachable must not report success. Set
+# HEALTHCHECK_URL=<url> in the env file to have it checked here (the Host header is
+# taken from SITE, so localhost works behind traefik).
+HC=$(envget HEALTHCHECK_URL)
+if [ -n "$HC" ]; then
+  HC_CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $SITE" "$HC" || echo 000)
+  case "$HC_CODE" in
+    2*|3*) echo "  healthcheck $HC -> $HC_CODE" ;;
+    *)     echo "ERROR: healthcheck $HC returned $HC_CODE -- the deploy completed but the" >&2
+           echo "       site is NOT serving. Check traefik routers and nginx before walking away." >&2
+           HC_FAILED=1 ;;
+  esac
+fi
+
 printf '%s  project=%s  deployed=%s  previous=%s  migrate=%s  backup=%s  fast=%s\n' \
   "$(date -u +%FT%TZ)" "$PROJECT" "$TARGET" "$RUNNING" "$MIGRATE" "$BACKUP" "$FAST" >> config/deploy-history.log
 echo
 echo "deployed $TARGET"
-echo "roll back with:  ./re-deploy.sh ${RUNNING##*:}"
+echo "roll back with:  ./re-deploy.sh --project $PROJECT ${RUNNING##*:}"
+[ "${HC_FAILED:-0}" = 1 ] && exit 1
+exit 0
