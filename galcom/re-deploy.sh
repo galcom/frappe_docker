@@ -1,13 +1,21 @@
 #!/bin/bash
 # Deploy, or roll back to, a specific image tag.
 #
-#   ./re-deploy.sh                   deploy CUSTOM_TAG from config/staging.env
+#   ./re-deploy.sh --project NAME    deploy CUSTOM_TAG from config/NAME.env
 #   ./re-deploy.sh 20260918-1400     deploy that tag -- this is also how you roll back
 #   ./re-deploy.sh --list            available image tags and recent deploys
 #   ./re-deploy.sh --migrate         run `bench migrate` after the stack comes up
 #   ./re-deploy.sh --backup          run `bench backup` before migrating (recommended)
+#   ./re-deploy.sh --migrate-only    run `bench migrate` against the stack as it is.
+#                                    Nothing is rendered, pulled, recreated or restarted;
+#                                    no tag argument is accepted. Combine with --backup.
 #   ./re-deploy.sh --dry-run         render and report only; the running stack is untouched
-#   ./re-deploy.sh --project NAME    act on another environment (default: staging)
+#
+#   --project NAME  REQUIRED, no default. Selects config/<NAME>.env, which supplies the
+#                   image, site, compose file list and (via COMPOSE_PROJECT_NAME) the
+#                   stack this acts on. May also be given as PROJECT=<NAME>.
+#                   Deploying to the wrong environment is not something to do by
+#                   accident, so there is deliberately no fallback.
 #   ./re-deploy.sh --fast            recreate the backend first and the workers after, so
 #                                    only the backend's restart is user-visible. Measured
 #                                    on staging: 20.8s of downtime versus 61.6s for the
@@ -34,14 +42,27 @@ cd "$(dirname "$(readlink -f "$0")")/../.."
 
 # Which environment. Override with --project NAME or PROJECT=name in the environment.
 # Everything else is derived from it, so the same script serves staging and production.
-PROJECT="${PROJECT:-staging}"
+PROJECT="${PROJECT:-}"
 for i in $(seq 1 $#); do
   [ "${!i}" = "--project" ] || continue
   j=$((i+1)); PROJECT="${!j:-$PROJECT}"
 done
 
+# Print the comment header as help. --help must work before any environment is resolved.
+usage() { awk 'NR==1{next} /^#/{print; next} {exit}' "$0"; }
+case " $* " in *" --help "*|*" -h "*) usage; exit 0 ;; esac
+
+if [ -z "$PROJECT" ]; then
+  usage
+  echo "error: --project is required (no default). Available: $(ls config/*.env 2>/dev/null | sed 's|config/||; s|\.env$||' | tr '\n' ' ')" >&2
+  exit 1
+fi
+
 ENV_FILE=config/$PROJECT.env
-[ -f "$ENV_FILE" ] || { echo "error: $ENV_FILE not found (wrong --project?)" >&2; exit 1; }
+if [ ! -f "$ENV_FILE" ]; then
+  echo "error: $ENV_FILE not found (wrong --project?). Available: $(ls config/*.env 2>/dev/null | sed 's|config/||; s|\.env$||' | tr '\n' ' ')" >&2
+  exit 1
+fi
 
 # Read (never source) the env file: it contains backticks that a shell would execute.
 envget() { sed -n "s/^$1=//p" "$ENV_FILE" | head -1; }
@@ -72,7 +93,7 @@ for f in $FILES; do
   COMPOSE_ARGS+=(-f "$f")
 done
 
-DRY=0; TAG=""; MIGRATE=0; BACKUP=0; FAST=0
+DRY=0; TAG=""; MIGRATE=0; BACKUP=0; FAST=0; MIGRATE_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --list)
@@ -86,8 +107,9 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1 ;;
     --fast)    FAST=1 ;;
     --migrate) MIGRATE=1 ;;
+    --migrate-only) MIGRATE_ONLY=1 ;;
     --backup)  BACKUP=1 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     -*)        echo "unknown option: $1" >&2; exit 1 ;;
     *)         TAG="$1" ;;
   esac
@@ -115,6 +137,56 @@ mixed_images() {  # $1 = rendered compose file
 render() {
   docker compose --project-name $STACK --env-file $ENV_FILE "${COMPOSE_ARGS[@]}" config
 }
+
+# Migrate the running stack in place. Deliberately does not render, recreate or restart
+# anything: use it when the image is already deployed and only the database needs to catch
+# up. Note that a migration is not undone by rolling the image back -- take --backup.
+if [ "$MIGRATE_ONLY" = 1 ]; then
+  [ -z "$TAG" ] || { echo "error: --migrate-only does not deploy an image; drop the tag '$TAG'" >&2; exit 1; }
+  CID=${STACK}-backend-1
+  [ "$(docker inspect -f '{{.State.Running}}' "$CID" 2>/dev/null)" = true ] \
+    || { echo "error: $CID is not running; nothing to migrate against" >&2; exit 1; }
+  CIMG=$(docker inspect -f '{{.Config.Image}}' "$CID")
+
+  echo "stack   : $STACK"
+  echo "site    : $SITE"
+  echo "image   : $CIMG  (unchanged -- nothing will be restarted)"
+
+  if [ "$DRY" = 1 ]; then
+    [ "$BACKUP" = 1 ] && echo "would backup : bench --site $SITE backup"
+    echo "would migrate: bench --site $SITE migrate"
+    exit 0
+  fi
+
+  if [ "$BACKUP" = 1 ]; then
+    echo "== backup =="
+    docker exec -w /home/frappe/frappe-bench "$CID" bench --site "$SITE" backup \
+      || { echo "ERROR: backup failed; not migrating." >&2; exit 1; }
+  else
+    echo "note: no backup taken; a migration cannot be undone by redeploying the old image"
+  fi
+
+  echo "== migrate =="
+  if ! docker exec -w /home/frappe/frappe-bench "$CID" bench --site "$SITE" migrate; then
+    echo "ERROR: migrate failed. The site may be in a partially migrated state." >&2
+    exit 1
+  fi
+
+  HC=$(envget HEALTHCHECK_URL)
+  if [ -n "$HC" ]; then
+    HC_CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $SITE" "$HC" || echo 000)
+    case "$HC_CODE" in
+      2*|3*) echo "  healthcheck $HC -> $HC_CODE" ;;
+      *)     echo "ERROR: healthcheck $HC returned $HC_CODE after migrating." >&2; exit 1 ;;
+    esac
+  fi
+
+  printf '%s  project=%s  migrate-only  site=%s  image=%s  backup=%s\n' \
+    "$(date -u +%FT%TZ)" "$PROJECT" "$SITE" "$CIMG" "$BACKUP" >> config/deploy-history.log
+  echo
+  echo "migrate complete; no containers were restarted"
+  exit 0
+fi
 
 if [ "$DRY" = 1 ]; then
   echo "running now : $RUNNING"
